@@ -46,6 +46,25 @@ const parseTimetable = async (filePath, day) => {
 
     // Fallback: row-based layout (days listed per row)
     if (normalizedRequestedDay && timetable.length === 0) {
+      // Try header-based grid extractor (times in header columns, subjects in day row cells)
+      const gridHeaderExtraction = extractByGridWithHeaders(result, normalizedRequestedDay);
+      if (gridHeaderExtraction.timetable.length > 0) {
+        timetable = gridHeaderExtraction.timetable;
+        subjects = gridHeaderExtraction.subjects;
+        extractionMode = 'grid-headers';
+      }
+
+      // Try complex grid extractor first (handles nested subrows/subcolumns and swapped orientation)
+      const gridExtraction = extractByComplexGrid(result, normalizedRequestedDay);
+      if (gridExtraction.timetable.length > 0) {
+        timetable = gridExtraction.timetable;
+        subjects = gridExtraction.subjects;
+        extractionMode = 'grid';
+      }
+    }
+
+    // If still empty, try simpler row-based extraction
+    if (normalizedRequestedDay && timetable.length === 0) {
       const rowExtraction = extractByRowLayout(result, normalizedRequestedDay);
       if (rowExtraction.timetable.length > 0) {
         timetable = rowExtraction.timetable;
@@ -65,7 +84,28 @@ const parseTimetable = async (filePath, day) => {
     }
 
     // If a specific day is requested but not detected anywhere in the image text, treat as holiday immediately
+    // BUT also extract timetables for all detected days so frontend can save them
     if (normalizedRequestedDay && !detectedDays.includes(normalizedRequestedDay)) {
+      const allDaysTimetables = {};
+      for (const detectedDay of detectedDays) {
+        const dayExtraction = extractByLayout(result, detectedDay);
+        if (dayExtraction.timetable.length > 0) {
+          allDaysTimetables[detectedDay] = {
+            timetable: dayExtraction.timetable,
+            subjects: dayExtraction.subjects
+          };
+        } else {
+          // Try row-based
+          const rowEx = extractByRowLayout(result, detectedDay);
+          if (rowEx.timetable.length > 0) {
+            allDaysTimetables[detectedDay] = {
+              timetable: rowEx.timetable,
+              subjects: rowEx.subjects
+            };
+          }
+        }
+      }
+      
       return {
         timetable: [],
         subjects: [],
@@ -74,6 +114,7 @@ const parseTimetable = async (filePath, day) => {
         detectedDays: dedupeFullDays(detectedDays),
         detectedDaysCount: dedupeFullDays(detectedDays).length,
         detectedDate,
+        allDaysTimetables, // Include all extracted timetables
       };
     }
 
@@ -103,14 +144,41 @@ const parseTimetable = async (filePath, day) => {
       };
     }
 
+    // Build allDaysTimetables for every detected day (including requested day)
+    const allDaysTimetables = {};
+    for (const detectedDay of detectedDays) {
+      const dayExtraction = extractByLayout(result, detectedDay);
+      if (dayExtraction.timetable.length > 0) {
+        allDaysTimetables[detectedDay] = {
+          timetable: dayExtraction.timetable,
+          subjects: dayExtraction.subjects
+        };
+        continue;
+      }
+      const rowEx = extractByRowLayout(result, detectedDay);
+      if (rowEx.timetable.length > 0) {
+        allDaysTimetables[detectedDay] = {
+          timetable: rowEx.timetable,
+          subjects: rowEx.subjects
+        };
+      }
+    }
+
+    // Post-process: remove lunch/recess
+    const cleanTimetable = (timetable || []).filter((t) => {
+      const s = (t.subject || '').toLowerCase();
+      return !(s.includes('lunch') || s.includes('break') || s.includes('recess'));
+    });
+
     return {
-      timetable,
-      subjects,
+      timetable: cleanTimetable,
+      subjects: Array.from(new Set(cleanTimetable.map(t=>t.subject))).filter(Boolean),
       holiday: false,
       detectedDays: dedupeFullDays(detectedDays),
       detectedDaysCount: dedupeFullDays(detectedDays).length,
       detectedDate,
       extractionMode,
+      allDaysTimetables,
     };
   } catch (error) {
     console.error('OCR Error:', error);
@@ -163,11 +231,11 @@ function extractTimetableData(text, day) {
     // Reject noisy/gibberish subjects
     const lowerSubj = subject.toLowerCase();
     const normalized = lowerSubj.replace(/\s+/g, '');
-    const noiseWords = ['period', 'time', 'duration', 'day', 'date', 'am', 'pm', 'name', ...DAY_NAMES];
-    const hasLetters = /[a-zA-Z]{3,}/.test(subject); // require at least 3 letters
+    const noiseWords = ['period', 'time', 'duration', 'day', 'date', 'am', 'pm', 'name', 'class', 'lunch', 'break', 'recess', ...DAY_NAMES];
+    const hasLetters = /[a-zA-Z]{2,}/.test(subject); // require at least 2 letters
     const isPureAmPm = /^(am|pm|ampm|a m|p m|am pm|pm am)$/i.test(normalized);
     if (!hasLetters) continue;
-    if (subject.length < 3) continue;
+    if (subject.length < 2) continue;
     if (noiseWords.includes(lowerSubj)) continue;
     if (isPureAmPm) continue;
 
@@ -341,10 +409,10 @@ function extractByLayout(result, requestedDay) {
 
     const lowerSubj = subject.toLowerCase();
     const normalized = lowerSubj.replace(/\s+/g, '');
-    const noiseWords = ['period', 'time', 'duration', 'day', 'date', 'am', 'pm', 'name', ...DAY_NAMES];
-    const hasLetters = /[a-zA-Z]{3,}/.test(subject);
+    const noiseWords = ['period', 'time', 'duration', 'day', 'date', 'am', 'pm', 'name', 'class', 'lunch', 'break', 'recess', ...DAY_NAMES];
+    const hasLetters = /[a-zA-Z]{2,}/.test(subject);
     const isPureAmPm = /^(am|pm|ampm|a m|p m|am pm|pm am)$/i.test(normalized);
-    if (!hasLetters || subject.length < 3 || noiseWords.includes(lowerSubj) || isPureAmPm) continue;
+    if (!hasLetters || subject.length < 2 || noiseWords.includes(lowerSubj) || isPureAmPm) continue;
 
     timetable.push({ sno: sno++, subject, time: timeLabel, status: '' });
   }
@@ -396,8 +464,8 @@ function extractByLayout(result, requestedDay) {
       subject = subject.replace(/[^A-Za-z+&\s]/g, ' ').replace(/\s+/g, ' ').trim();
       const lowerSubj = subject.toLowerCase();
       const normalized = lowerSubj.replace(/\s+/g, '');
-      const noiseWords = ['period', 'time', 'duration', 'day', 'date', 'am', 'pm', 'name', ...DAY_NAMES];
-      const hasLetters = /[a-zA-Z]{3,}/.test(subject);
+      const noiseWords = ['period', 'time', 'duration', 'day', 'date', 'am', 'pm', 'name', 'class', 'lunch', 'break', 'recess', ...DAY_NAMES];
+      const hasLetters = /[a-zA-Z]{2,}/.test(subject);
       const isPureAmPm = /^(am|pm|ampm|a m|p m|am pm|pm am)$/i.test(normalized);
       if (!hasLetters || subject.length < 3 || noiseWords.includes(lowerSubj) || isPureAmPm) continue;
       timetable.push({ sno: sno2++, subject, time: timeLabel, status: '' });
@@ -565,6 +633,219 @@ function dedupeFullDays(arr) {
     if (order.includes(n)) set.add(n);
   }
   return Array.from(set);
+}
+
+// Advanced grid extractor: handles nested subrows/subcolumns and swapped orientation
+function extractByComplexGrid(result, requestedDay) {
+  const words = Array.isArray(result?.data?.words) ? result.data.words : [];
+  if (!words.length) return { timetable: [], subjects: [] };
+
+  const requested = normalizeDay(requestedDay || '');
+  const dayWords = words.filter((w) => {
+    const txt = (w.text || '').toLowerCase().replace(/[^a-z]/g, '');
+    return normalizeDay(txt) === requested;
+  }).filter(w=>w?.bbox);
+  if (!dayWords.length) return { timetable: [], subjects: [] };
+
+  // Pick the top-most occurrence as header anchor
+  const header = dayWords.reduce((best, w) => (!best || (w.bbox.y0 < best.bbox.y0)) ? w : best, null);
+  const headerY0 = header.bbox.y0;
+  // Determine neighbor headers along the same band to estimate column boundaries
+  const allDayWords = words.filter(w=>w?.bbox && normalizeDay((w.text||'').toLowerCase().replace(/[^a-z]/g,'')));
+  const sameBand = allDayWords.filter(w=>Math.abs((w.bbox?.y0 ?? 0) - headerY0) <= 80);
+  const headersSorted = sameBand.map(w=>({
+    day: normalizeDay(w.text),
+    bbox: w.bbox,
+    xCenter: (w.bbox.x0 + w.bbox.x1) / 2,
+  })).filter(h=>!!h.day).sort((a,b)=>a.xCenter-b.xCenter);
+  const idx = headersSorted.findIndex(h=>h.day===requested);
+  const prev = headersSorted[idx-1] || null;
+  const next = headersSorted[idx+1] || null;
+  const headerWidth = header.bbox.x1 - header.bbox.x0;
+  const leftBoundary = prev ? (prev.xCenter + header.bbox.x0 + headerWidth/2) / 2 : Math.max(0, header.bbox.x0 - headerWidth*0.8);
+  const rightBoundary = next ? (header.bbox.x1 + next.xCenter) / 2 : header.bbox.x1 + headerWidth*0.8;
+  const headerBottomY = header.bbox.y1;
+
+  // Collect words in the day column below header
+  const colWords = words.filter(w=>{
+    if (!w?.bbox) return false;
+    const xCenter = (w.bbox.x0 + w.bbox.x1) / 2;
+    const inCol = xCenter >= leftBoundary && xCenter <= rightBoundary;
+    const below = w.bbox.y0 >= headerBottomY + 2;
+    return inCol && below;
+  }).sort((a,b)=>a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+  if (!colWords.length) return { timetable: [], subjects: [] };
+
+  // Cluster colWords into row bands by Y
+  const rows = clusterByY(colWords, 18);
+
+  const timePattern = buildTimeRangeRegex();
+  const roomPattern = /\b\d{3,4}\b/;
+  const timetable = [];
+  let sno = 1;
+
+  for (const row of rows) {
+    // Split row into segments (subcolumns) by large X gaps
+    const segs = splitIntoSegmentsByX(row, 24);
+    for (const seg of segs) {
+      const lineText = seg.map(w=>w.text).join(' ').trim();
+      if (!lineText) continue;
+      // Detect time anywhere along the full row for robustness
+      const rowTextAll = row.map(w=>w.text).join(' ');
+      const timeMatches = [...rowTextAll.matchAll(timePattern)];
+      const timeLabel = timeMatches.length ? normalizeTimeMatch(timeMatches[0]).timeLabel : '';
+      let subject = lineText;
+      if (timeMatches.length) subject = subject.replace(timeMatches[0][0], ' ').trim();
+      subject = subject.replace(roomPattern, ' ').replace(/\([^)]*\)/g, ' ').replace(/\b(a\.?m\.?|p\.?m\.?)\b/gi, ' ');
+      subject = subject.replace(/[^A-Za-z+&\s]/g, ' ').replace(/\s+/g, ' ').trim();
+      // Remove obvious faculty names prefixes
+      subject = subject.replace(/^(mr\.?|mrs\.?|ms\.?|dr\.?|prof\.?)(\s+|$)/i, ' ').trim();
+
+      const lowerSubj = subject.toLowerCase();
+      const normalizedNoSpace = lowerSubj.replace(/\s+/g, '');
+      const noiseWords = ['period','time','duration','day','date','am','pm','name','class','lunch','break','recess',...DAY_NAMES];
+      const hasLetters = /[a-zA-Z]{3,}/.test(subject);
+      const isPureAmPm = /^(am|pm|ampm|ampm)$/i.test(normalizedNoSpace);
+      if (!hasLetters || subject.length < 3 || noiseWords.includes(lowerSubj) || isPureAmPm) continue;
+
+      timetable.push({ sno: sno++, subject, time: timeLabel, status: '' });
+    }
+  }
+
+  const subjects = Array.from(new Set(timetable.map(t=>t.subject))).filter(Boolean);
+  return { timetable, subjects };
+}
+
+function clusterByY(words, tol) {
+  const rows = [];
+  for (const w of words) {
+    const txt = (w.text||'').trim();
+    if (!txt) continue;
+    let placed = false;
+    for (const row of rows) {
+      const last = row[row.length-1];
+      if (Math.abs((w.bbox?.y0 ?? 0) - (last.bbox?.y0 ?? 0)) <= tol) {
+        row.push(w);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) rows.push([w]);
+  }
+  return rows;
+}
+
+function splitIntoSegmentsByX(words, gapTol) {
+  const sorted = [...words].sort((a,b)=>a.bbox.x0 - b.bbox.x0);
+  const segs = [];
+  let curr = [];
+  for (let i=0;i<sorted.length;i++) {
+    const w = sorted[i];
+    if (!curr.length) { curr.push(w); continue; }
+    const prev = curr[curr.length-1];
+    const gap = Math.max(0, (w.bbox.x0 - prev.bbox.x1));
+    if (gap > gapTol) { segs.push(curr); curr = [w]; }
+    else { curr.push(w); }
+  }
+  if (curr.length) segs.push(curr);
+  return segs;
+}
+
+// Grid extractor using time headers and day bands
+function extractByGridWithHeaders(result, requestedDay) {
+  const words = Array.isArray(result?.data?.words) ? result.data.words : [];
+  if (!words.length) return { timetable: [], subjects: [] };
+
+  const requested = normalizeDay(requestedDay || '');
+  // Find all day words and pick the requested day occurrence with lowest y (top-most row header cell)
+  const dayWordsAll = words.filter(w=>w?.bbox && normalizeDay((w.text||'').toLowerCase().replace(/[^a-z]/g,'')));
+  const requestedWords = dayWordsAll.filter(w=>normalizeDay((w.text||'').toLowerCase().replace(/[^a-z]/g,''))===requested);
+  if (!requestedWords.length) return { timetable: [], subjects: [] };
+  const reqHeader = requestedWords.reduce((best, w)=>(!best || (w.bbox.y0 < best.bbox.y0))? w: best, null);
+  const headerY0 = reqHeader.bbox.y0;
+  // Determine the next day header below to get the band end
+  const otherDayCandidates = dayWordsAll.filter(w=>w.bbox.y0 > headerY0 + 5);
+  const nextDay = otherDayCandidates.reduce((best,w)=>{
+    if (!best) return w;
+    return (w.bbox.y0 < best.bbox.y0) ? w : best;
+  }, null);
+  const bandY0 = reqHeader.bbox.y1 + 2;
+  const bandY1 = nextDay ? nextDay.bbox.y0 - 2 : Math.max(...words.map(w=>w?.bbox?.y1 || 0));
+
+  // Find time headers along the top using time regex within the top 25% of page
+  const pageMaxY = Math.max(...words.map(w=>w?.bbox?.y1 || 0)) || 1000;
+  const topBandLimit = pageMaxY * 0.35;
+  const timePattern = buildTimeRangeRegex();
+  const timeWords = words.filter(w=>w?.bbox && w.bbox.y0 <= topBandLimit && timePattern.test(w.text || ''));
+  if (!timeWords.length) return { timetable: [], subjects: [] };
+  // Reset regex state for reuse
+  const timeLabelsRaw = timeWords.map(w=>({ bbox: w.bbox, text: w.text }));
+  // Sort by x and compute column boundaries from centers
+  const timeCols = timeLabelsRaw.sort((a,b)=>a.bbox.x0 - b.bbox.x0).map(t=>({
+    label: (t.text.match(timePattern) || [null])[0] ? normalizeTimeMatch(t.text.match(timePattern))?.timeLabel : t.text,
+    xCenter: (t.bbox.x0 + t.bbox.x1)/2,
+    x0: t.bbox.x0,
+    x1: t.bbox.x1,
+  }));
+  if (!timeCols.length) return { timetable: [], subjects: [] };
+  // Create boundaries between centers
+  const boundaries = [];
+  for (let i=0;i<timeCols.length;i++) {
+    const prev = timeCols[i-1] || null;
+    const curr = timeCols[i];
+    const next = timeCols[i+1] || null;
+    const left = prev ? (prev.xCenter + curr.xCenter)/2 : Math.max(0, curr.x0 - (curr.x1-curr.x0)*0.8);
+    const right = next ? (curr.xCenter + next.xCenter)/2 : curr.x1 + (curr.x1-curr.x0)*0.8;
+    boundaries.push({ label: curr.label, left, right });
+  }
+
+  // For each time column, capture cell words within the day band and boundary, then isolate subject subrow
+  const roomFacultyRegex = /(room\s*no\.?|room\b|name\s*of\s*the\s*faculty|faculty\b)/i;
+  const subjectHeaderRegex = /(name\s*of\s*the\s*subject|subject\b)/i;
+  const timetable = [];
+  let sno = 1;
+
+  for (const col of boundaries) {
+    const cellWords = words.filter(w=>{
+      if (!w?.bbox) return false;
+      const xCenter = (w.bbox.x0 + w.bbox.x1)/2;
+      const inCol = xCenter >= col.left && xCenter <= col.right;
+      const inBand = w.bbox.y0 >= bandY0 && w.bbox.y1 <= bandY1;
+      return inCol && inBand;
+    }).sort((a,b)=> a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+    if (!cellWords.length) continue;
+
+    // Build lines by Y proximity to isolate subrows
+    const subRows = clusterByY(cellWords, 14);
+    // Prefer the subrow that looks like a subject: has letters, does not contain room/faculty keywords; or follows a subject header
+    let subjectLine = '';
+    let sawSubjectHeader = false;
+    for (const sub of subRows) {
+      const text = sub.map(w=>w.text).join(' ').trim();
+      if (!text) continue;
+      if (subjectHeaderRegex.test(text)) { sawSubjectHeader = true; continue; }
+      if (sawSubjectHeader) {
+        subjectLine = text; break;
+      }
+      if (!roomFacultyRegex.test(text)) {
+        const cleaned = text.replace(/\([^)]*\)/g, ' ').replace(/\b(a\.?m\.?|p\.?m\.?)\b/gi, ' ');
+        const letters = cleaned.replace(/[^A-Za-z+&\s]/g,' ').replace(/\s+/g,' ').trim();
+        if (/[A-Za-z]{3,}/.test(letters)) {
+          subjectLine = letters; break;
+        }
+      }
+    }
+    if (!subjectLine) continue;
+
+    // Normalize subject line and skip lunch/break
+    const lowerSubj = subjectLine.toLowerCase();
+    if (lowerSubj.includes('lunch') || lowerSubj.includes('break') || lowerSubj.includes('recess')) continue;
+
+    timetable.push({ sno: sno++, subject: subjectLine, time: col.label || '', status: '' });
+  }
+
+  const subjects = Array.from(new Set(timetable.map(t=>t.subject))).filter(Boolean);
+  return { timetable, subjects };
 }
 
 module.exports = { parseTimetable };

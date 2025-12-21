@@ -62,7 +62,7 @@ const uploadTimetable = [
       console.log(`Processing timetable for ${day} (${date})`);
       
       // Parse the timetable using OCR
-      const { timetable, subjects, holiday, message, detectedDays, detectedDaysCount, detectedDate } = await parseTimetable(req.file.path, day);
+      const { timetable, subjects, holiday, message, detectedDays, detectedDaysCount, detectedDate, allDaysTimetables } = await parseTimetable(req.file.path, day);
       
       // Store by date-day key
       const key = `${date}-${day}`;
@@ -77,6 +77,7 @@ const uploadTimetable = [
         detectedDays,
         detectedDaysCount,
         detectedDate,
+        allDaysTimetables,
       };
 
       res.status(200).json({ 
@@ -90,6 +91,7 @@ const uploadTimetable = [
         detectedDays,
         detectedDaysCount,
         detectedDate,
+        allDaysTimetables,
       });
     } catch (error) {
       console.error('Upload error:', error);
